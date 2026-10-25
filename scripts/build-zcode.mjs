@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { loadEndpointEnv } from "./load-endpoint-env.mjs";
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import { runCommand } from "./spawn-command.mjs";
 import {
   copyRuntimeNodeModules,
   patchNodePtyPrebuilds,
@@ -100,19 +100,14 @@ function commandText(command, args) {
 
 function run(command, args, options = {}) {
   console.log(`[zcode] ${commandText(command, args)}`);
-  const result = spawnSync(command, args, {
+  // 修复原因：Windows 上 bare `pnpm` 由 cmd shim（pnpm.cmd）提供，spawnSync 直接执行
+  // 只会查找 .exe 并抛 ENOENT，导致 `pnpm build:zcode` 在 win32 上必然失败。
+  // 复用 spawn-command.mjs 的 shell 解析与含空格参数引号规则，避免这里再维护一套
+  // Windows shim 判断。tar 仍是真实可执行文件，走原生的非 shell 分支。
+  runCommand(command, args, {
     cwd: root,
-    stdio: "inherit",
     ...options,
   });
-  if (result.error) {
-    throw new Error(`${commandText(command, args)} failed: ${result.error.message}`, {
-      cause: result.error,
-    });
-  }
-  if (result.status !== 0) {
-    throw new Error(`${commandText(command, args)} failed`);
-  }
 }
 
 async function readJson(file) {

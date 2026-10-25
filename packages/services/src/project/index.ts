@@ -83,6 +83,12 @@ export function createProjectService(options: {
 }): IProjectService {
   const route = async (hostId?: string) => {
     if (!hostId || hostId === (options.ownerHostId ?? "local")) return null;
+    // 普通 Web / ZCode Lite 的浏览器只有一个「此电脑」设备，客户端固定传 "local"；
+    // 而独立 Server 的持库 identity 是 remote:server:<id>，两者不是同一个 host。
+    // 没注入 resolveHost 就说明当前进程自己就持这套项目数据（desktop 的 local owner
+    // 或 standalone server），此时把 "local" 当作本进程 owner 做本地路由；否则
+    // Web 建项目/开会话必然 project.host-offline，页面永远进不了会话。
+    if (hostId === "local" && !options.resolveHost) return null;
     if (!options.resolveHost) throw new Error("project.host-offline");
     return options.resolveHost(hostId);
   };
@@ -161,6 +167,13 @@ export function createProjectService(options: {
       );
       const result = (await options.repository()).saveProject({
         ...input,
+        // 浏览器形态只有一个「此电脑」设备，客户端固定传 "local"；standalone server
+        // 的持库 owner 是 remote:server:<id>。路由到本地后必须把 "local" 归一到本进程
+        // owner，否则仓库层会判成跨 host 保存（project.host-immutable），Web 永远建不了项目。
+        hostId:
+          input.hostId === "local" && options.ownerHostId && options.ownerHostId !== "local"
+            ? options.ownerHostId
+            : input.hostId,
         roots,
         ...(input.primaryRoot ? { primaryRoot: normalize(input.primaryRoot) } : {}),
       });

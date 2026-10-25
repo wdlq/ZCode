@@ -1,0 +1,3 @@
+;!@Install@!UTF-8!
+RunProgram="powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1"
+;!@InstallEnd@!
