@@ -1,0 +1,6 @@
+; WinRAR SFX 脚本（不是 7-Zip 的 ;!@Install@ 格式）
+; 7-Zip 自带的 7z.sfx 不会执行 RunProgram，因此安装器必须用 WinRAR 打包。
+Setup=powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
+Silent=1
+Overwrite=1
+Title=ZCode for Windows 7

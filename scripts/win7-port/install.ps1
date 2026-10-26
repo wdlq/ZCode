@@ -1,83 +1,122 @@
 ﻿#Requires -Version 5.1
 <#
-  ZCode Windows 7 离线安装包 —— 引导脚本
+  ZCode for Windows 7 - offline installer (bootstrap)
 
-  为什么分两段：
-  - 7-Zip SFX 解压到 %TEMP% 下的临时目录，SFX 进程退出后该目录会被清理；
-  - 安装需要管理员权限，而 SFX 本身通常不是以管理员启动的。
-  因此这里先把 payload 复制到固定临时目录，再以管理员身份启动 install-core.ps1，
-  并 -Wait 等待它结束（父进程存活时 SFX 不会清理目录）。
+  Why this split:
+  - The self-extracting package unpacks itself into %TEMP% and deletes that folder
+    as soon as this script exits, while the elevated child process still needs the
+    payload. So when elevation is required we copy the payload to a stable folder.
+  - When we are already elevated (e.g. right-click "Run as administrator") we run
+    the core installer in place and skip a 322 MB copy.
+
+  All console output is ASCII on purpose: Windows 7 consoles may run CP936, CP65001
+  or a raster font that cannot render CJK, which produced mojibake in the field.
 #>
 [CmdletBinding()]
 param(
   [string]$TargetDir = "C:\Program Files\ZCode-Win7",
-  [switch]$NoShortcuts
+  [switch]$NoShortcuts,
+  [switch]$SkipRegistry
 )
 
 $ErrorActionPreference = "Stop"
-try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
-function Write-Step([string]$Text, [string]$Color = "") {
+function Say {
+  param(
+    [Parameter(Position = 0)][string]$Text = "",
+    [Parameter(Position = 1)][string]$Color = ""
+  )
   try {
     if ($Color) { Write-Host $Text -ForegroundColor $Color } else { Write-Host $Text }
-  } catch { try { [Console]::Out.WriteLine(($Text -replace '[^\x20-\x7E]', '?')) } catch {} }
-}
-
-Write-Step "ZCode Windows 7 离线安装"
-Write-Step "--------------------------"
-
-$payload = Join-Path $PSScriptRoot "payload.zip"
-$core = Join-Path $PSScriptRoot "install-core.ps1"
-foreach ($required in @($payload, $core)) {
-  if (-not (Test-Path -LiteralPath $required)) {
-    Write-Step "安装包不完整，缺少：$required" "Red"
-    exit 2
+  } catch {
+    try { [Console]::Out.WriteLine(($Text -replace '[^\x20-\x7E]', '?')) } catch { }
   }
 }
 
+Say ""
+Say "ZCode for Windows 7 - offline installer"
+Say "======================================="
+Say "Target : $TargetDir"
+
+$payload = Join-Path $PSScriptRoot "payload.zip"
+$core = Join-Path $PSScriptRoot "install-core.ps1"
+$prereqDir = Join-Path $PSScriptRoot "prereq"
+foreach ($required in @($payload, $core)) {
+  if (-not (Test-Path -LiteralPath $required)) {
+    Say "ERROR: incomplete package, missing $required" "Red"
+    exit 2
+  }
+}
+$payloadMb = [math]::Round((Get-Item -LiteralPath $payload).Length / 1MB, 1)
+Say "Payload: $payloadMb MB"
+
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+  [Security.Principal.WindowsBuiltInRole]::Administrator
+)
+if ($isAdmin) {
+  Say "Running with administrator rights."
+  Say ""
+}
+
+# Always stage to a stable folder: the self-extracting launcher may remove its own
+# temp folder as soon as this script exits, while the installer (or its elevated
+# child) is still reading payload.zip.
+Say "Copying installer files to a temporary folder..."
 $stage = Join-Path $env:TEMP "zcode-win7-setup"
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
-
-Write-Step "  [1/4] 准备安装文件…"
 Copy-Item -LiteralPath $payload -Destination (Join-Path $stage "payload.zip") -Force
 Copy-Item -LiteralPath $core -Destination (Join-Path $stage "install-core.ps1") -Force
 if (Test-Path -LiteralPath (Join-Path $PSScriptRoot "README.txt")) {
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot "README.txt") -Destination (Join-Path $stage "README.txt") -Force
 }
-# 预置依赖（VxKex 安装程序）也要带到固定临时目录，install-core 才能找到。
-$prereqDir = Join-Path $PSScriptRoot "prereq"
 if (Test-Path -LiteralPath $prereqDir) {
   Copy-Item -LiteralPath $prereqDir -Destination (Join-Path $stage "prereq") -Recurse -Force
 }
+Say "Done."
 
-$installed = Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum
-Write-Step ("      已准备 {0:N0} MB" -f ($installed.Sum / 1MB))
-
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-  [Security.Principal.WindowsBuiltInRole]::Administrator
-)
-
-$coreArgs = @(
+$stagedArgs = @(
   "-NoProfile",
   "-ExecutionPolicy", "Bypass",
-  "-File", (Join-Path $stage "install-core.ps1"),
-  "-TargetDir", $TargetDir,
-  "-Payload", (Join-Path $stage "payload.zip")
+  "-File", ('"' + (Join-Path $stage "install-core.ps1") + '"'),
+  "-TargetDir", ('"' + $TargetDir + '"'),
+  "-Payload", ('"' + (Join-Path $stage "payload.zip") + '"')
 )
-if ($NoShortcuts) { $coreArgs += "-NoShortcuts" }
+if (Test-Path -LiteralPath (Join-Path $stage "prereq")) { $stagedArgs += @("-PrereqDir", ('"' + (Join-Path $stage "prereq") + '"')) }
+if ($NoShortcuts) { $stagedArgs += "-NoShortcuts" }
+if ($SkipRegistry) { $stagedArgs += "-SkipRegistry" }
 
 if ($isAdmin) {
-  & powershell @coreArgs
-  exit $LASTEXITCODE
+  # Detach: the self-extracting launcher exits immediately after starting Setup and
+  # takes its whole process tree (job object) with it. A WMI-created process is
+  # outside that job, so extraction survives. `start` gives it its own console.
+  $argumentLine = @(
+    '-NoProfile', '-ExecutionPolicy Bypass', '-File', ('"' + (Join-Path $stage 'install-core.ps1') + '"'),
+    '-TargetDir', ('"' + $TargetDir + '"'),
+    '-Payload', ('"' + (Join-Path $stage 'payload.zip') + '"')
+  )
+  if (Test-Path -LiteralPath (Join-Path $stage 'prereq')) {
+    $argumentLine += @('-PrereqDir', ('"' + (Join-Path $stage 'prereq') + '"'))
+  }
+  if ($NoShortcuts) { $argumentLine += '-NoShortcuts' }
+  if ($SkipRegistry) { $argumentLine += '-SkipRegistry' }
+  $commandLine = 'cmd.exe /c start "ZCode Setup" powershell.exe ' + ($argumentLine -join ' ')
+  $result = ([wmiclass]"Win32_Process").Create($commandLine, $stage, $null)
+  if ($result.ReturnValue -ne 0) {
+    Say "ERROR: failed to start the installer (Win32_Process.Create returned $($result.ReturnValue))." "Red"
+    exit 4
+  }
+  Say "Installer started in a separate window (PID $($result.ProcessId))."
+  Say "Follow the progress there; this window can be closed."
+  exit 0
 }
 
-Write-Step "  [2/4] 请求管理员权限…"
+Say "Requesting administrator privileges (please confirm the UAC prompt)..."
 try {
-  $process = Start-Process -FilePath "powershell.exe" -ArgumentList $coreArgs -Verb RunAs -Wait -PassThru
+  $process = Start-Process -FilePath "powershell.exe" -ArgumentList $stagedArgs -Verb RunAs -Wait -PassThru
   exit $process.ExitCode
 } catch {
-  Write-Step "未获得管理员权限，安装中止。" "Red"
-  Write-Step "请右键本安装程序 → 以管理员身份运行。" "Yellow"
+  Say "ERROR: administrator rights were not granted. Installation aborted." "Red"
+  Say "Right-click the installer and choose 'Run as administrator'." "Yellow"
   exit 3
 }

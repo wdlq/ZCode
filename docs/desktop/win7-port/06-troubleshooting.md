@@ -83,7 +83,43 @@ Win7 点阵字体渲染中文失败；加上 `$ErrorActionPreference = "Stop"`�
 
 **根因**：对已经压缩好的 `payload.zip` 再压缩。
 
-**修复**：SFX 用 `-mx0`（store）。
+**修复**：SFX 用 `-m0`（store）。
+
+### B7. 双击安装器“只解压、不安装”
+
+**症状**：exe 旁边多出 `install.ps1` / `install-core.ps1` / `payload.zip` / `README.txt` / `prereq\`，
+没有任何窗口，也没有装到目标目录。
+
+**根因**：用 **7-Zip 自带的 `7z.sfx`** 打的包。24.09 实测它**不执行 `config.txt` 里的
+`RunProgram`**，只会把内容解到当前目录。支持 `RunProgram` 的是改装模块 `7zSD.sfx`。
+
+**修复**：改用 **WinRAR SFX**（`Setup=powershell ... install.ps1` + `Silent=1`），
+见 [05](./05-build-and-release.md#52-命令)。
+
+### B8. WinRAR 打的包双击无反应（0 秒退出、退出码 0）
+
+**根因**：打包机上的 WinRAR 版本与 Win7 不兼容。实测 **7.11.2 打的包在 Win7 上静默退出**，
+用 7.21.1 在 Win7 上打同一个 payload 就正常。
+
+**修复**：**在 Win7 目标机上打包**，并用已验证版本（本项已验证 7.21.1）。
+
+### B9. 安装卡在 `[1/4] 解压` / 建 `install.json` 前中断
+
+三个独立原因，已全部修在脚本里：
+
+| 现象 | 根因 | 修法 |
+| --- | --- | --- |
+| 解到 23k/30k 就失败 | `MAX_PATH=260`：`%TEMP%\zcode-extract-<guid>` 前缀 + 深层 `node_modules` 超限 | 临时目录改短：`C:\zc-stage-xxxxxx`；解压前打印最长路径并校验 |
+| 7-Zip 在 96% 被**无声终止** | WinRAR SFX 启动 Setup 后立即退出，并杀掉整个进程树（Job 对象） | 管理员分支改用 **WMI(`Win32_Process.Create`) + `start`** 分离进程 |
+| 解压明明成功却报“7-Zip reported errors” | `Start-Process -PassThru` 的 `ExitCode` 可能持续为 `$null`，`$null -ne 0` 为真 | `WaitForExit()` + `Refresh()` 后再读，并以关键文件（`desktop\ZCode.exe`、`web\runtime\node.exe`）存在性做双重校验 |
+| 进度停住但无报错 | PS 5.1 把本地命令 stderr 转成 `NativeCommandError`，`Stop` 下直接中断 | 7-Zip 不再进 PowerShell 管道；改为重定向到日志文件 + 轮询日志取百分比 |
+
+### B10. 安装窗口里中文是乱码
+
+**根因**：Win7 控制台可能是 CP936 / CP65001 / 点阵字体，脚本输出非 ASCII 时既可能乱码，
+也可能触发 `0x1F` 写入失败。
+
+**修复**：安装器已改为 **全 ASCII 输出**；中文说明单独放在 `README.txt`（用记事本打开）。
 
 ## C. 运行时
 
@@ -143,6 +179,11 @@ Win7 点阵字体渲染中文失败；加上 `$ErrorActionPreference = "Stop"`�
 **根因**：上一次只杀了父进程，子进程仍持有端口。
 
 **修复**：启动器会自动清理本安装目录下的 node 进程再启动；也可以用「停止 ZCode Web 版」。
+
+### C9. 安装器窗口一闪而过，但后台确实装完了
+
+**原因**：SFX 启动 Setup 后立即退出（不等待），真正的安装在新控制台窗口里继续。
+**不是故障**；引导脚本会打印 `Installer started in a separate window (PID ...)`。
 
 ## D. 快速自检清单（排障前先跑一遍）
 

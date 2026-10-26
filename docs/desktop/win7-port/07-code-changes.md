@@ -120,7 +120,7 @@ Windows 的 `pnpm` 是 `pnpm.cmd` shim；`spawnSync("pnpm")` 不会解析 `.cmd`
 | PE 补丁脚本 | 构建期使用 | 改 PE32+ 可选头 4 个 WORD（10.0 → 6.1） |
 | VxKex 注册逻辑 | 启动器 + 安装器 | 按绝对路径匹配；安装器用路径哈希命名 |
 | 桌面组装 | `resources\app` / `glm` / `config` | 见 03 |
-| 离线安装器 | `install.ps1` / `install-core.ps1` / SFX | 见 05 |
+| 离线安装器 | `install.ps1` / `install-core.ps1` / `sfx-config.txt` | WinRAR SFX（`Setup=`）；WMI 分离进程；短路径 staging；ASCII 输出；详见 05 |
 | 浏览器工具 | `tools/browser-verify.mjs`、`desktop-ui-check.mjs` | 见 04 |
 | 后端策略 | 工作区 `AGENTS.md` | 分形态选择浏览器后端 |
 

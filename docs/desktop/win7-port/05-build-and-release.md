@@ -152,47 +152,65 @@ sfx\                         （SFX 归档内容）
 # 压 payload（7-Zip，Deflate）
 & "C:\Program Files\7-Zip\7z.exe" a -tzip -mx5 -mm=Deflate payload.zip .\payload\*
 
-# 打 SFX（注意：模块名必须能在当前目录找到，先 cd 到目录或用 -sfx 默认模块）
-cd .
-& "C:\Program Files\7-Zip\7z.exe" a -sfx -mx0 ZCode-Win7-Offline-Setup.exe .\sfx\*
+# 打 SFX（必须用 WinRAR，且必须在 Win7 目标机上打）
+cd .\sfx
+& "C:\Program Files\WinRAR\WinRAR.exe" a -sfx -r -m0 -ep1 -z..\sfx-config.txt ..\ZCode-Win7-Offline-Setup.exe *
 ```
 
-**踩坑 3：`-sfx7zCon.sfx` 会报 `cannot find specified SFX module`。**
-7-Zip 只在特定位置找模块；最稳的是 `cd` 到构建目录后用 `-sfx`（默认 `7z.sfx`），
-或先把 `7zCon.sfx` 复制到当前目录再 `-sfx7zCon.sfx`。
+`sfx-config.txt`（WinRAR 语法，**不是** 7-Zip 的 `;!@Install@`）：
 
-**踩坑 4：不要在 SFX 里再压缩 `payload.zip`。** 用 `-mx0`（store），否则二次压缩白耗 CPU
-且体积几乎不变。
+```text
+Setup=powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
+Silent=1
+Overwrite=1
+Title=ZCode for Windows 7
+```
+
+**踩坑 3：7-Zip 自带的 `7z.sfx` 不执行 `RunProgram`。**
+用 `7z a -sfx` 打出来的包，双击只会把内容解到当前目录，不会运行 `config.txt`。
+支持 `RunProgram` 的是改装模块 `7zSD.sfx`；本项目改用 WinRAR SFX（`Setup=`）规避。
+
+**踩坑 4：WinRAR 的 SFX stub 有版本差异。** 本机 WinRAR **7.11.2** 打出的包在 Win7 上
+静默退出（0 秒、退出码 0、什么都不做）；在 Win7 上用 **7.21.1** 打的同一个 payload 正常。
+→ 结论：**打包必须在 Win7 目标机上、用已验证版本的 WinRAR 完成**。
+
+**踩坑 5：必须 `-r`。** 不加递归参数时 `prereq\` 不会进归档，VxKex 缺失时就无法自动拉起安装器。
+
+**踩坑 6：不要再压缩 `payload.zip`。** `-m0`（store）即可，二次压缩白耗 CPU 且体积几乎不变。
 
 ### 5.3 安装脚本关键点
 
 | 点 | 原因 |
 | --- | --- |
-| 引导脚本先把 payload 复制到 `%TEMP%\zcode-win7-setup` | SFX 退出会清理自身临时目录，而提权子进程还在用 |
-| `Start-Process -Verb RunAs -Wait` | 提权需要用户同意；`-Wait` 保证父进程存活 |
-| `-TargetDir` 默认 `C:\Program Files\ZCode-Win7` | 需要管理员写权限 |
-| 解压到临时目录再原子替换 | 覆盖升级时避免半新半旧 |
-| 覆盖前 `Stop-Process` 目标目录内的进程 | 否则目录被占用无法替换 |
+| 引导脚本**总是**先把 payload 复制到 `%TEMP%\zcode-win7-setup` | SFX 退出会清掉自身临时目录；不先落地就会在解压中途丢失 `payload.zip` |
+| 管理员分支用 **WMI(`Win32_Process.Create`) + `start`** 分离进程 | SFX 启动 Setup 后立刻退出，并连带**杀掉整个进程树**（实测 7-Zip 在 96% 被无声终止）；WMI 进程不在同一 Job 里 |
+| 解压临时目录用短路径 `C:\zc-stage-xxxxxx` | Win7 的 `MAX_PATH=260`；`%TEMP%\zcode-extract-<guid>` 前缀太长，深层 `node_modules` 会超限（实测 23k/30k 时 7-Zip 失败） |
+| 解压前打印最长路径并校验 | 让用户尽早把安装目录改短（如 `D:\ZCode`）而不是等到中途失败 |
+| 7-Zip 的 stderr 不接入 PowerShell 管道 | PS 5.1 会把本地命令的 stderr 变成 `NativeCommandError`，在 `$ErrorActionPreference=Stop` 下直接中断安装 |
+| 解压后**用关键文件存在性 + ExitCode 双重判定** | `Start-Process -PassThru` 的 `ExitCode` 可能一直为 `$null`，`$null -ne 0` 会误判失败 |
+| 所有控制台输出为 **ASCII** | Win7 控制台可能是 CP936 / CP65001 / 点阵字体，中文会乱码甚至抛 `0x1F` |
+| `-TargetDir` / `-Payload` 传给子进程时**显式加引号** | `Start-Process -ArgumentList` 不会自动为含空格参数加引号 |
 | 过滤项名 = `VxKex_ZCODE_<路径哈希>` | 同一 exe 名多份安装时不会互相覆盖 `FilterFullPath` |
-| 用 `System.IO.Compression.ZipFile` 解压 | `Expand-Archive` 在 PS 5.1 上对大包更慢 |
+| 解压后原子替换目标目录 | 覆盖升级时避免半新半旧 |
 
 ### 5.4 验收
 
 ```powershell
-# 单文件安装器内容
+# 单文件安装器内容（确认 install.ps1 / payload.zip / prereq 都在）
 & "C:\Program Files\7-Zip\7z.exe" l ZCode-Win7-Offline-Setup.exe
 
-# 直接跑核心逻辑（跳过 UAC，便于自动化验证）
-install-core.ps1 -TargetDir "C:\Program Files\ZCode-Win7-Test" `
-  -Payload .\payload.zip -NoShortcuts
+# 直接跑核心逻辑（跳过 UAC 与注册表，便于自动化验证）
+install-core.ps1 -TargetDir "D:\zc-test" -Payload .\payload.zip -NoShortcuts -SkipRegistry
 
 # 验证两个形态
 #   桌面：启动后 /json/version 返回 Chrome/146.*，/json/list 有 title=ZCode
 #   Web ：/api/server-info 返回 200
 ```
 
-实测：安装到新目录后，桌面端 CDP 显示 `Chrome/146.0.7680.80`、标题 `ZCode`；
-Web 端 `server-info` 返回 200，`node.exe` 与 `ZCode.exe` 的 VxKex 过滤项均已注册。
+实测（Windows 7 SP1 x64，WinRAR 7.21.1 打包）：双击/命令行启动后约 3～5 分钟完成；
+安装目录 28,641 个文件 / 1.07 GB；`install.json` 写入；
+桌面端 CDP 显示 `Chrome/146.0.7680.80`、标题 `ZCode`；
+Web 端 `server-info` 返回 200；两处 VxKex 均已指向新路径。
 
 ## 6. 版本与产物体积参考
 
